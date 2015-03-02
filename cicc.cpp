@@ -3,6 +3,8 @@
 #include <llvm/Bitcode/ReaderWriter.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/InstrTypes.h>
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <nvvm.h>
 
 #include <dlfcn.h>
@@ -47,10 +49,56 @@ void modifyModule(Module* module)
 {
 	if (!module) return;
 
+	cout << "Module " << endl;
+
 	// Add suffix to function name, for example.
-	for (Module::iterator i = module->begin(), e = module->end(); i != e; i++)
-		if (!i->isIntrinsic())
-			i->setName(i->getName() + "_modified");
+	for (Module::iterator f = module->begin(), fe = module->end(); f != fe; f++)
+	{
+		cout << "Function " << f->getNameStr() << endl;
+
+		for (Function::iterator bb = f->begin(), bbe = f->end(); bb != bbe; bb++)
+		{
+			cout << "BasicBlock " << bb->getNameStr() << " instructions " << bb->size() << endl;
+
+			for (BasicBlock::iterator i = bb->begin(), ie = bb->end(); i != ie; i++)
+			{
+				unsigned int opcode = i->getOpcode();
+				unsigned int numOperands = i->getNumOperands();
+
+				cout << "Instruction opcode " << opcode << " opcode name " << i->getOpcodeName()
+				     << " operands " << numOperands;
+				for (unsigned int opIndex = 0; opIndex < numOperands; opIndex++)
+				{
+					Value* operand = i->getOperand(opIndex);
+					cout << " " << operand->getNameStr();
+				}
+			    cout << endl;
+				outs() << *i;
+				cout << endl;
+
+				//
+				if (opcode == 9)
+				{
+					Instruction* newInstruction = BinaryOperator::Create(Instruction::Mul, i->getOperand(0), i->getOperand(1));
+					cout << "newInstruction opcode " << newInstruction->getOpcode() << " opcode name " << newInstruction->getOpcodeName()
+						     << " operands " << newInstruction->getNumOperands();
+					for (unsigned int opIndex = 0; opIndex < newInstruction->getNumOperands(); opIndex++)
+					{
+						cout << " " << newInstruction->getOperand(opIndex)->getNameStr();
+					}
+					cout << endl;
+					outs() << *newInstruction;
+					cout << endl;
+
+					//BasicBlock::iterator ii(i);
+					//ReplaceInstWithInst(i->getParent()->getInstList(), ii, newInstruction);
+					//ReplaceInstWithInst(i, newInstruction);
+				}
+			}
+		}
+	}
+	
+	//cout << module.getFunctionList() << endl;
 }
 
 bool called_compile = false;
@@ -79,7 +127,7 @@ nvvmResult nvvmAddModuleToProgram(nvvmProgram prog, const char *bitcode, size_t 
 		printf("MODULE BEFORE OPTIMIZATIONS\n");
 		printf("===========================\n\n");		
 
-		outs() << *initial_module;
+//		outs() << *initial_module;
 
 		// Save module back into bitcode.
 		SmallVector<char, 128> output;
@@ -146,6 +194,8 @@ struct tm *localtime(const time_t *timep)
 		printf("\n==========================\n");
 		printf("MODULE AFTER OPTIMIZATIONS\n");
 		printf("==========================\n\n");
+
+		cout << endl << endl << "------" << endl << "llvm code" << endl << "------" << endl << endl;
 
 		if (optimized_module)
 			outs() << *optimized_module;
