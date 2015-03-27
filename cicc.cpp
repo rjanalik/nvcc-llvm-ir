@@ -7,13 +7,19 @@
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <nvvm.h>
 
-#include <dlfcn.h>
-#include <iostream>
 #include <cstdio>
+#include <dlfcn.h>
+#include <fstream>
+#include <iostream>
+#include <sstream>
 #include <string>
+#include <unistd.h>
 
 using namespace llvm;
 using namespace std;
+
+// Switch resulting module printing on/off.
+bool print_module = true;
 
 #define LIBNVVM "libnvvm.so"
 
@@ -43,62 +49,63 @@ if (!sym##_real) \
 	} \
 }
 
-Module* initial_module = NULL;
+static bool memory_hooks = true;
 
-void modifyModule(Module* module)
+static void modifyModule(const char *bitcode, size_t size, string& output)
 {
-	if (!module) return;
-
-	cout << "Module " << endl;
-
-	// Add suffix to function name, for example.
-	for (Module::iterator f = module->begin(), fe = module->end(); f != fe; f++)
+	// Create a temporary file.
+	struct TempFile
 	{
-		cout << "Function " << f->getNameStr() << endl;
+		string filename;
 
-		for (Function::iterator bb = f->begin(), bbe = f->end(); bb != bbe; bb++)
+		TempFile(const string& mask) : filename("")
 		{
-			cout << "BasicBlock " << bb->getNameStr() << " instructions " << bb->size() << endl;
-
-			for (BasicBlock::iterator i = bb->begin(), ie = bb->end(); i != ie; i++)
-			{
-				unsigned int opcode = i->getOpcode();
-				unsigned int numOperands = i->getNumOperands();
-
-				cout << "Instruction opcode " << opcode << " opcode name " << i->getOpcodeName()
-				     << " operands " << numOperands;
-				for (unsigned int opIndex = 0; opIndex < numOperands; opIndex++)
-				{
-					Value* operand = i->getOperand(opIndex);
-					cout << " " << operand->getNameStr();
-				}
-			    cout << endl;
-				outs() << *i;
-				cout << endl;
-
-				//
-				if (opcode == 9)
-				{
-					Instruction* newInstruction = BinaryOperator::Create(Instruction::Mul, i->getOperand(0), i->getOperand(1));
-					cout << "newInstruction opcode " << newInstruction->getOpcode() << " opcode name " << newInstruction->getOpcodeName()
-						     << " operands " << newInstruction->getNumOperands();
-					for (unsigned int opIndex = 0; opIndex < newInstruction->getNumOperands(); opIndex++)
-					{
-						cout << " " << newInstruction->getOperand(opIndex)->getNameStr();
-					}
-					cout << endl;
-					outs() << *newInstruction;
-					cout << endl;
-
-					//BasicBlock::iterator ii(i);
-					//ReplaceInstWithInst(i->getParent()->getInstList(), ii, newInstruction);
-					//ReplaceInstWithInst(i, newInstruction);
-				}
-			}
+			vector<char> vfilename(mask.c_str(), mask.c_str() + mask.size() + 1);
+			int fd = mkstemp(&vfilename[0]);
+			if (fd == -1)
+				return;
+			close(fd);
+			filename = (char*)&vfilename[0];
+			unlink(filename.c_str());
 		}
 	}
+	tmp("/tmp/fileXXXXXX");
+
+	// Make sure the temp filename is generated.		
+	if (tmp.filename == "")
+	{
+		cerr << "Cannot create a temp file" << endl;
+		exit(1);
+	}
+
+	// Store LLVM IR bitcode into temp file.
+	string input = "";
+	input.reserve(size);
+	input.assign(bitcode, bitcode + size);
+	ofstream tmpstream(tmp.filename.c_str(), ios::out | ios::binary);
+	tmpstream << input;
+	tmpstream.close();
+
+	// Invoke LLVM IR modification pass program and receive
+	// the output IR bitcode.
+	{
+		stringstream cmd;
+		char* cwd = get_current_dir_name();
+		cmd << cwd << "/pass " << tmp.filename;
+		//cout << cmd.str() << endl;
+		system(cmd.str().c_str());
+	}
+
+	ifstream inputstr(tmp.filename.c_str(), ios::in | ios::binary);
+	output.assign(istreambuf_iterator<char>(inputstr), istreambuf_iterator<char>());
 	
-	//cout << module.getFunctionList() << endl;
+	if (output == "")
+	{
+		cerr << "Module modification pass not found" << endl;
+		exit(1);
+	}
+
+	memory_hooks = true;
 }
 
 bool called_compile = false;
@@ -109,31 +116,34 @@ nvvmResult nvvmAddModuleToProgram(nvvmProgram prog, const char *bitcode, size_t 
 	bind_sym(libnvvm, nvvmAddModuleToProgram, nvvmResult, nvvmProgram, const char*, size_t, const char*);
 
 	// Load module from bitcode.
-	if (getenv("CICC_MODIFY_UNOPT_MODULE") && !initial_module)
+	if (getenv("CICC_MODIFY_UNOPT_MODULE"))
 	{
-		string source = "";
-		source.reserve(size);
-		source.assign(bitcode, bitcode + size);
-		MemoryBuffer *input = MemoryBuffer::getMemBuffer(source);
-		string err;
-		LLVMContext &context = getGlobalContext();
-		initial_module = ParseBitcodeFile(input, context, &err);
-		if (!initial_module)
-			cerr << "Error parsing module bitcode : " << err;
+		memory_hooks = false;
 
-		modifyModule(initial_module);
+		string output;
+		modifyModule(bitcode, size, output);
 
-		printf("\n===========================\n");
-		printf("MODULE BEFORE OPTIMIZATIONS\n");
-		printf("===========================\n\n");		
+		if (print_module)
+		{
+			printf("\n===========================\n");
+			printf("MODULE BEFORE OPTIMIZATIONS\n");
+			printf("===========================\n\n");
 
-//		outs() << *initial_module;
+			string err;
+			LLVMContext &context = getGlobalContext();
+			MemoryBuffer* mboutput = MemoryBuffer::getMemBuffer(output);
+			Module* module = ParseBitcodeFile(mboutput, context, &err);
 
-		// Save module back into bitcode.
-		SmallVector<char, 128> output;
-		raw_svector_ostream outputStream(output);
-		WriteBitcodeToFile(initial_module, outputStream);
-		outputStream.flush();
+			if (!module)
+			{
+				cerr << "Error parsing output module: " << err << endl;
+				exit(1);
+			}
+
+			outs() << *module;
+		}
+
+		memory_hooks = true;
 
 		// Call real nvvmAddModuleToProgram
 		return nvvmAddModuleToProgram_real(prog, output.data(), output.size(), name);
@@ -189,16 +199,38 @@ struct tm *localtime(const time_t *timep)
 	{
 		localtime_first_call = false;
 
-		modifyModule(optimized_module);
+		memory_hooks = false;
 
-		printf("\n==========================\n");
-		printf("MODULE AFTER OPTIMIZATIONS\n");
-		printf("==========================\n\n");
+		// Save module into bitcode.
+		SmallVector<char, 128> bitcode;
+		raw_svector_ostream outputStream(bitcode);
+		WriteBitcodeToFile(optimized_module, outputStream);
+		outputStream.flush();
 
-		cout << endl << endl << "------" << endl << "llvm code" << endl << "------" << endl << endl;
+		string output;
+		modifyModule(bitcode.data(), bitcode.size(), output);
 
-		if (optimized_module)
-			outs() << *optimized_module;
+		if (print_module)
+		{
+			printf("\n==========================\n");
+			printf("MODULE AFTER OPTIMIZATIONS\n");
+			printf("==========================\n\n");
+
+			string err;
+			LLVMContext &context = getGlobalContext();
+			MemoryBuffer* mboutput = MemoryBuffer::getMemBuffer(output);
+			Module* module = ParseBitcodeFile(mboutput, context, &err);
+
+			if (!module)
+			{
+				cerr << "Error parsing output module: " << err << endl;
+				exit(1);
+			}
+
+			outs() << *module;
+		}
+
+		memory_hooks = true;
 	}
 	
 	return localtime_real(timep);
@@ -220,7 +252,7 @@ extern "C" void* malloc(size_t size)
 
 	static bool __thread inside_malloc = false;
 	
-	if (!inside_malloc)
+	if (!inside_malloc || !memory_hooks)
 	{
 		inside_malloc = true;
 
@@ -260,14 +292,17 @@ extern "C" void* realloc(void* ptr, size_t size)
 	bind_lib(LIBC);
 	bind_sym(libc, realloc, void*, void*, size_t);
 	
-	for (int i = 0; i < nsbrks; i++)
-		if (ptr == sbrks[i].address)
-		{
-			void* result = malloc(size);
+	if (memory_hooks)
+	{
+		for (int i = 0; i < nsbrks; i++)
+			if (ptr == sbrks[i].address)
+			{
+				void* result = malloc(size);
 #define MIN(a,b) (a) < (b) ? (a) : (b)
-			memcpy(result, ptr, MIN(size, sbrks[i].size));
-			return result;
-		}
+				memcpy(result, ptr, MIN(size, sbrks[i].size));
+				return result;
+			}
+	}
 	
 	return realloc_real(ptr, size);
 }
@@ -277,10 +312,13 @@ extern "C" void free(void* ptr)
 	bind_lib(LIBC);
 	bind_sym(libc, free, void, void*);
 
-	pthread_mutex_lock(&mutex);
-	for (int i = 0; i < nsbrks; i++)
-		if (ptr == sbrks[i].address) return;
-	pthread_mutex_unlock(&mutex);
+	if (memory_hooks)
+	{
+		pthread_mutex_lock(&mutex);
+		for (int i = 0; i < nsbrks; i++)
+			if (ptr == sbrks[i].address) return;
+		pthread_mutex_unlock(&mutex);
+	}
 	
 	free_real(ptr);
 }
