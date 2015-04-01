@@ -21,6 +21,11 @@ static void modifyModule(Module* module)
 {
 	if (!module) return;
 
+	cout << endl
+	     << "-----------------------" << endl
+		 << "|--- pass begin -------|" << endl
+		 << "-----------------------" << endl << endl;
+
 	cout << "Module " << endl;
 
 	// Add suffix to function name, for example.
@@ -49,11 +54,22 @@ static void modifyModule(Module* module)
 				cout << endl;
 
 				//
-				if (opcode == 9)
+				Instruction* newInstruction = NULL;
+
+				switch (opcode)
 				{
-					Instruction* newInstruction = BinaryOperator::Create(Instruction::Mul, i->getOperand(0), i->getOperand(1));
+					case 9:		// add
+						newInstruction = BinaryOperator::Create(Instruction::Mul, i->getOperand(0), i->getOperand(1));
+						break;
+					case 49:	// call
+						cout << "call instruction, operand 2: " << i->getOperand(1) << endl;
+						break;
+				}
+
+				if (newInstruction != NULL)
+				{
 					cout << "newInstruction opcode " << newInstruction->getOpcode() << " opcode name " << newInstruction->getOpcodeName()
-						     << " operands " << newInstruction->getNumOperands();
+							 << " operands " << newInstruction->getNumOperands();
 					for (unsigned int opIndex = 0; opIndex < newInstruction->getNumOperands(); opIndex++)
 					{
 						cout << " " << newInstruction->getOperand(opIndex)->getNameStr();
@@ -62,14 +78,20 @@ static void modifyModule(Module* module)
 					outs() << *newInstruction;
 					cout << endl;
 
-					BasicBlock::iterator ii(i);
-					ReplaceInstWithInst(i->getParent()->getInstList(), ii, newInstruction);
-					ReplaceInstWithInst(i, newInstruction);
+					//BasicBlock::iterator ii(i);
+					//ReplaceInstWithInst(i->getParent()->getInstList(), ii, newInstruction);
+					//ReplaceInstWithInst(i, newInstruction);
+					ReplaceInstWithInst(i->getParent()->getInstList(), i, newInstruction);
 				}
 			}
 		}
 	}
 	
+	cout << endl
+	     << "-----------------------" << endl
+		 << "|--- pass end --------|" << endl
+		 << "-----------------------" << endl << endl;
+
 	//cout << module.getFunctionList() << endl;
 }
 
@@ -92,7 +114,15 @@ int main(int argc, char* argv[])
 	if (!module)
 		cout << "Error parsing module bitcode : " << err;
 
+	cout << "--------- before -----------" << endl;
+	outs() << *module;
+	cout << "--------- before end -------" << endl;
+
 	modifyModule(module);
+
+	cout << "--------- after ------------" << endl;
+	outs() << *module;
+	cout << "--------- after end --------" << endl;
 
 	// Save module into bitcode.
 	SmallVector<char, 128> bitcode;
